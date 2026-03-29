@@ -51,6 +51,9 @@ pub struct RegisterRequest {
     pub channels: Vec<u64>,
 }
 
+/// Maximum number of devices per address (prevents amplification attacks).
+const MAX_DEVICES_PER_ADDRESS: usize = 10;
+
 /// The device registry — thread-safe mapping of addresses to push tokens.
 pub struct DeviceRegistry {
     /// Address → list of registered devices (a user can have multiple devices).
@@ -83,6 +86,13 @@ impl DeviceRegistry {
         // Update existing registration with same token, or add new
         if let Some(existing) = entry.iter_mut().find(|d| d.token == req.token) {
             *existing = registration;
+        } else if entry.len() >= MAX_DEVICES_PER_ADDRESS {
+            // Evict oldest registration to stay within the cap
+            entry.sort_by_key(|d| d.registered_at);
+            entry.remove(0);
+            entry.push(registration);
+            info!(address = %req.address, platform = ?req.platform, "Device registered (evicted oldest)");
+            return;
         } else {
             entry.push(registration);
         }
