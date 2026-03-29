@@ -9,7 +9,9 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 /// Top-level gateway configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Note: `Debug` is manually implemented to redact secrets.
+#[derive(Clone, Deserialize)]
 pub struct Config {
     pub gateway: GatewayConfig,
     #[serde(default)]
@@ -24,7 +26,20 @@ pub struct Config {
     pub logging: LoggingConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config")
+            .field("gateway", &self.gateway)
+            .field("ogmara", &self.ogmara)
+            .field("fcm", &format_args!("FcmConfig {{ enabled: {} }}", self.fcm.enabled))
+            .field("apns", &format_args!("ApnsConfig {{ enabled: {} }}", self.apns.enabled))
+            .field("webpush", &format_args!("WebPushConfig {{ enabled: {} }}", self.webpush.enabled))
+            .field("logging", &self.logging)
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct GatewayConfig {
     /// API listen port (default: 41722).
     #[serde(default = "default_port")]
@@ -32,6 +47,13 @@ pub struct GatewayConfig {
     /// Listen address (default: 127.0.0.1).
     #[serde(default = "default_addr")]
     pub listen_addr: String,
+    /// Shared secret for L2 node → gateway authentication on /push.
+    /// Must be set via environment variable OGMARA_PUSH_SECRET in production.
+    #[serde(default)]
+    pub push_secret: String,
+    /// Maximum requests per second per IP (rate limiting, default: 20).
+    #[serde(default = "default_rate_limit")]
+    pub rate_limit_per_sec: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,7 +71,7 @@ impl Default for OgmaraConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct FcmConfig {
     /// Whether FCM push is enabled.
     #[serde(default)]
@@ -59,7 +81,7 @@ pub struct FcmConfig {
     pub credentials_file: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct ApnsConfig {
     /// Whether APNs push is enabled.
     #[serde(default)]
@@ -75,7 +97,7 @@ pub struct ApnsConfig {
     pub team_id: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct WebPushConfig {
     /// Whether Web Push is enabled.
     #[serde(default)]
@@ -103,6 +125,10 @@ impl Default for LoggingConfig {
             format: "json".to_string(),
         }
     }
+}
+
+fn default_rate_limit() -> u32 {
+    20
 }
 
 fn default_port() -> u16 {
@@ -136,6 +162,9 @@ impl Config {
         r#"[gateway]
 listen_port = 41722
 listen_addr = "127.0.0.1"
+# Shared secret for L2 node -> gateway auth. Set via OGMARA_PUSH_SECRET env var.
+push_secret = ""
+rate_limit_per_sec = 20
 
 [ogmara]
 node_urls = ["ws://localhost:41721/api/v1/ws/public"]

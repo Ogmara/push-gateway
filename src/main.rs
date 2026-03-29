@@ -82,9 +82,14 @@ async fn main() -> Result<()> {
             }
 
             // Start REST API server
+            // Push secret: prefer env var, fall back to config file
+            let push_secret = std::env::var("OGMARA_PUSH_SECRET")
+                .unwrap_or_else(|_| cfg.gateway.push_secret.clone());
+
             let api_state = Arc::new(api::ApiState {
                 registry: registry.clone(),
                 dispatcher: dispatcher.clone(),
+                push_secret,
             });
             let app = api::build_router(api_state);
 

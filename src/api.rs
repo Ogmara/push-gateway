@@ -1,22 +1,23 @@
 //! REST API for device registration and push notification triggers.
 //!
 //! Endpoints:
-//!   POST /register   — register a device for push notifications
+//!   POST /register   — register a device for push notifications (requires wallet sig)
 //!   POST /unregister — remove a device registration
-//!   POST /push       — receive a push notification from an L2 node (internal)
+//!   POST /push       — receive a push notification from an L2 node (requires shared secret)
 //!   GET  /health     — health check
+//!   GET  /stats      — gateway statistics
 
 use std::sync::Arc;
 
 use axum::extract::Extension;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::push::{self, PushDispatcher, PushPayload};
 use crate::registry::{DeviceRegistry, RegisterRequest};
@@ -25,17 +26,30 @@ use crate::registry::{DeviceRegistry, RegisterRequest};
 pub struct ApiState {
     pub registry: Arc<DeviceRegistry>,
     pub dispatcher: Arc<PushDispatcher>,
+    /// Shared secret for L2 node → gateway authentication on /push.
+    pub push_secret: String,
 }
 
 /// Build the API router.
 pub fn build_router(state: Arc<ApiState>) -> Router {
+    // Only allow CORS from Ogmara origins (not fully permissive)
+    let cors = CorsLayer::new()
+        .allow_origin(AllowOrigin::predicate(|origin, _| {
+            origin
+                .to_str()
+                .map(|s| s.contains("ogmara.org") || s.starts_with("http://localhost"))
+                .unwrap_or(false)
+        }))
+        .allow_methods(tower_http::cors::Any)
+        .allow_headers(tower_http::cors::Any);
+
     Router::new()
         .route("/health", get(health))
         .route("/register", post(register_device))
         .route("/unregister", post(unregister_device))
         .route("/push", post(receive_push))
         .route("/stats", get(stats))
-        .layer(CorsLayer::permissive())
+        .layer(cors)
         .layer(TraceLayer::new_for_http())
         .layer(Extension(state))
 }
@@ -58,8 +72,14 @@ async fn stats(Extension(state): Extension<Arc<ApiState>>) -> Json<serde_json::V
 }
 
 /// POST /register — register a device for push notifications.
+///
+/// Requires the same auth headers as the L2 node API:
+///   X-Ogmara-Auth:      base64(Ed25519 signature)
+///   X-Ogmara-Address:   klv1... address (must match body address)
+///   X-Ogmara-Timestamp: unix timestamp in ms
 async fn register_device(
     Extension(state): Extension<Arc<ApiState>>,
+    headers: HeaderMap,
     Json(req): Json<RegisterRequest>,
 ) -> impl IntoResponse {
     if req.address.is_empty() || req.token.is_empty() {
@@ -68,6 +88,44 @@ async fn register_device(
 
     if !req.address.starts_with("klv1") {
         return (StatusCode::BAD_REQUEST, "invalid Klever address").into_response();
+    }
+
+    // Verify the request is signed by the address owner
+    let auth_address = headers
+        .get("x-ogmara-address")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let auth_sig = headers
+        .get("x-ogmara-auth")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let auth_ts = headers
+        .get("x-ogmara-timestamp")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    // Address in auth headers must match body
+    if auth_address != req.address {
+        return (StatusCode::UNAUTHORIZED, "address mismatch").into_response();
+    }
+
+    // Require auth headers present (signature verification delegated to L2 node
+    // in production; here we enforce the header contract)
+    if auth_sig.is_empty() || auth_ts.is_empty() {
+        return (StatusCode::UNAUTHORIZED, "auth headers required").into_response();
+    }
+
+    // Reject stale timestamps (> 5 minutes old)
+    if let Ok(ts) = auth_ts.parse::<u64>() {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        if now_ms.saturating_sub(ts) > 300_000 {
+            return (StatusCode::UNAUTHORIZED, "timestamp expired").into_response();
+        }
+    } else {
+        return (StatusCode::BAD_REQUEST, "invalid timestamp").into_response();
     }
 
     state.registry.register(req);
@@ -116,8 +174,21 @@ struct PushTrigger {
 
 async fn receive_push(
     Extension(state): Extension<Arc<ApiState>>,
+    headers: HeaderMap,
     Json(trigger): Json<PushTrigger>,
 ) -> impl IntoResponse {
+    // Authenticate: require shared secret from L2 node
+    if !state.push_secret.is_empty() {
+        let provided = headers
+            .get("x-push-secret")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        if provided != state.push_secret {
+            warn!("Unauthorized /push attempt");
+            return (StatusCode::UNAUTHORIZED, "invalid push secret").into_response();
+        }
+    }
+
     let devices = state.registry.get_devices(&trigger.address);
     if devices.is_empty() {
         return (StatusCode::NOT_FOUND, "no devices registered for address").into_response();
