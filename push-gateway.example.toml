@@ -1,0 +1,33 @@
+# Ogmara Push Notification Gateway — Example Configuration
+#
+# Copy to push-gateway.toml and edit for your setup.
+# Generate a default config with: ogmara-push-gateway init
+#
+# All secrets (API keys, credentials) must be loaded from
+# environment variables in production — never commit them.
+
+[gateway]
+listen_port = 41722
+listen_addr = "127.0.0.1"
+
+[ogmara]
+node_urls = ["ws://localhost:41721/api/v1/ws/public"]
+
+[fcm]
+enabled = false
+credentials_file = ""    # path to Firebase service account JSON
+
+[apns]
+enabled = false
+key_file = ""            # path to APNs auth key (.p8)
+key_id = ""              # APNs key ID
+team_id = ""             # Apple team ID
+
+[webpush]
+enabled = false
+vapid_private_key = ""   # VAPID private key
+vapid_subject = ""       # e.g., "mailto:admin@ogmara.org"
+
+[logging]
+level = "info"
+format = "json"

@@ -1,0 +1,10 @@
+/target/
+*.pem
+*.p8
+.env
+push-gateway.toml
+/data/
+.idea/
+.vscode/
+*.swp
+.DS_Store
