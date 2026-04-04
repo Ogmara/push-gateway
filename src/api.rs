@@ -121,7 +121,12 @@ async fn register_device(
         return (StatusCode::BAD_REQUEST, "invalid Klever address").into_response();
     }
 
-    // Verify the request is signed by the address owner
+    // Verify the request is signed by an authenticated user.
+    // Note: x-ogmara-address is the signing key (device address), which may
+    // differ from body.address (wallet address) in device-key delegation mode.
+    // The L2 node maintains the device→wallet mapping; we verify the auth
+    // header contract (signature present, timestamp fresh) but don't require
+    // the signing address to match the notification target address.
     let auth_address = headers
         .get("x-ogmara-address")
         .and_then(|v| v.to_str().ok())
@@ -135,9 +140,9 @@ async fn register_device(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
-    // Address in auth headers must match body
-    if auth_address != req.address {
-        return (StatusCode::UNAUTHORIZED, "address mismatch").into_response();
+    // Require valid auth header format (address must be a Klever address)
+    if !auth_address.starts_with("klv1") {
+        return (StatusCode::UNAUTHORIZED, "invalid auth address").into_response();
     }
 
     // Require auth headers present (signature verification delegated to L2 node
@@ -192,8 +197,8 @@ async fn unregister_device(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
-    if auth_address != req.address {
-        return (StatusCode::UNAUTHORIZED, "address mismatch").into_response();
+    if !auth_address.starts_with("klv1") {
+        return (StatusCode::UNAUTHORIZED, "invalid auth address").into_response();
     }
     if auth_sig.is_empty() || auth_ts.is_empty() {
         return (StatusCode::UNAUTHORIZED, "auth headers required").into_response();
