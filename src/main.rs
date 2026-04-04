@@ -10,10 +10,12 @@ mod push;
 mod registry;
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64URL;
+use base64::Engine;
 use clap::{Parser, Subcommand};
 use tracing::info;
 
@@ -64,8 +66,40 @@ async fn main() -> Result<()> {
                 env!("CARGO_PKG_VERSION")
             );
 
-            let registry = Arc::new(registry::DeviceRegistry::new());
+            // Load persistent device registry
+            let registry_path = Path::new(&cfg.gateway.registry_file);
+            let registry = Arc::new(registry::DeviceRegistry::load(registry_path));
+
             let dispatcher = Arc::new(push::PushDispatcher::new(&cfg));
+
+            // Derive VAPID public key for the /vapid-key endpoint
+            let vapid_public_key = if cfg.webpush.enabled && !cfg.webpush.vapid_private_key.is_empty()
+            {
+                match BASE64URL.decode(&cfg.webpush.vapid_private_key) {
+                    Ok(key_bytes) => {
+                        use p256::ecdsa::SigningKey;
+                        match SigningKey::from_slice(&key_bytes) {
+                            Ok(sk) => {
+                                let pk = sk.verifying_key();
+                                let pub_bytes = pk.to_sec1_bytes();
+                                let encoded = BASE64URL.encode(&pub_bytes);
+                                info!(key_len = pub_bytes.len(), "VAPID public key derived");
+                                encoded
+                            }
+                            Err(e) => {
+                                tracing::warn!(error = %e, "Failed to derive VAPID public key");
+                                String::new()
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Failed to decode VAPID private key for public key derivation");
+                        String::new()
+                    }
+                }
+            } else {
+                String::new()
+            };
 
             let (shutdown_tx, _) = tokio::sync::broadcast::channel::<()>(1);
 
@@ -90,6 +124,7 @@ async fn main() -> Result<()> {
                 registry: registry.clone(),
                 dispatcher: dispatcher.clone(),
                 push_secret,
+                vapid_public_key,
             });
             let app = api::build_router(api_state);
 

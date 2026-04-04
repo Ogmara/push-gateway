@@ -9,6 +9,12 @@
 [gateway]
 listen_port = 41722
 listen_addr = "127.0.0.1"
+# Shared secret for L2 node -> gateway auth. Set via OGMARA_PUSH_SECRET env var.
+# Must match the auth_token in the L2 node's [push_gateway] config.
+push_secret = ""
+rate_limit_per_sec = 20
+# Device registrations are persisted to this file.
+registry_file = "registry.json"
 
 [ogmara]
 node_urls = ["ws://localhost:41721/api/v1/ws/public"]
@@ -25,7 +31,7 @@ team_id = ""             # Apple team ID
 
 [webpush]
 enabled = false
-vapid_private_key = ""   # VAPID private key
+vapid_private_key = ""   # VAPID private key (base64url, 32 bytes)
 vapid_subject = ""       # e.g., "mailto:admin@ogmara.org"
 
 [logging]

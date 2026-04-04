@@ -556,7 +556,11 @@ impl PushDispatcher {
 
     // --- Web Push (VAPID) ---
 
-    /// Send notification via Web Push with VAPID authentication.
+    /// Send notification via Web Push with VAPID authentication and RFC 8291 encryption.
+    ///
+    /// The payload is encrypted using the subscription's p256dh and auth keys
+    /// per RFC 8291 (Encrypted Content-Encoding for HTTP). Browsers reject
+    /// unencrypted push payloads.
     async fn send_webpush(&self, subscription_json: &str, payload: &PushPayload) {
         let vapid_key = match &self.vapid_private_key {
             Some(k) => k,
@@ -589,6 +593,31 @@ impl PushDispatcher {
             }
         };
 
+        // Decrypt subscription keys (base64url-encoded by the browser Push API)
+        let client_pub = match BASE64URL.decode(&sub.keys.p256dh) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                warn!(platform = "webpush", error = %e, "Invalid p256dh key");
+                return;
+            }
+        };
+        let auth_secret = match BASE64URL.decode(&sub.keys.auth) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                warn!(platform = "webpush", error = %e, "Invalid auth secret");
+                return;
+            }
+        };
+
+        // RFC 8291: encrypt the payload using the subscription's keys
+        let encrypted = match ece::encrypt(&client_pub, &auth_secret, payload_json.as_bytes()) {
+            Ok(ciphertext) => ciphertext,
+            Err(e) => {
+                error!(platform = "webpush", error = %e, "RFC 8291 payload encryption failed");
+                return;
+            }
+        };
+
         // Build VAPID JWT for the subscription endpoint
         let jwt = match self.build_vapid_jwt(&sub.endpoint, vapid_key) {
             Some(t) => t,
@@ -612,9 +641,10 @@ impl PushDispatcher {
             .post(&sub.endpoint)
             .header("Authorization", &auth_header)
             .header("Content-Encoding", "aes128gcm")
+            .header("Content-Type", "application/octet-stream")
             .header("TTL", "86400")
             .header("Urgency", "high")
-            .body(payload_json.into_bytes())
+            .body(encrypted)
             .send()
             .await
         {
@@ -693,15 +723,16 @@ impl PushDispatcher {
 #[derive(Deserialize)]
 struct WebPushSubscription {
     endpoint: String,
-    #[allow(dead_code)]
-    keys: Option<WebPushKeys>,
+    keys: WebPushKeys,
 }
 
+/// Browser-provided keys for RFC 8291 payload encryption.
 #[derive(Deserialize)]
-#[allow(dead_code)]
 struct WebPushKeys {
-    p256dh: Option<String>,
-    auth: Option<String>,
+    /// Client's P-256 public key (base64url-encoded).
+    p256dh: String,
+    /// 16-byte auth secret (base64url-encoded).
+    auth: String,
 }
 
 /// SSRF protection: validate that a Web Push endpoint is an HTTPS URL
@@ -737,11 +768,24 @@ fn is_allowed_push_endpoint(endpoint: &str) -> bool {
 }
 
 /// Truncate a string for safe logging (avoids leaking sensitive data in error bodies).
+/// Uses char boundaries to avoid panicking on multi-byte UTF-8.
 fn truncate_for_log(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
     } else {
-        format!("{}...[truncated]", &s[..max])
+        match s.get(..max) {
+            Some(prefix) => format!("{}...[truncated]", prefix),
+            // max falls inside a multi-byte char — find the nearest boundary
+            None => {
+                let boundary = s
+                    .char_indices()
+                    .take_while(|(i, _)| *i < max)
+                    .last()
+                    .map(|(i, c)| i + c.len_utf8())
+                    .unwrap_or(0);
+                format!("{}...[truncated]", &s[..boundary])
+            }
+        }
     }
 }
 

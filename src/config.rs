@@ -54,6 +54,9 @@ pub struct GatewayConfig {
     /// Maximum requests per second per IP (rate limiting, default: 20).
     #[serde(default = "default_rate_limit")]
     pub rate_limit_per_sec: u32,
+    /// Path to the device registry persistence file (default: "registry.json").
+    #[serde(default = "default_registry_file")]
+    pub registry_file: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -131,6 +134,10 @@ fn default_rate_limit() -> u32 {
     20
 }
 
+fn default_registry_file() -> String {
+    "registry.json".to_string()
+}
+
 fn default_port() -> u16 {
     41722
 }
@@ -163,8 +170,11 @@ impl Config {
 listen_port = 41722
 listen_addr = "127.0.0.1"
 # Shared secret for L2 node -> gateway auth. Set via OGMARA_PUSH_SECRET env var.
+# Must match the auth_token in the L2 node's [push_gateway] config.
 push_secret = ""
 rate_limit_per_sec = 20
+# Device registrations are persisted to this file.
+registry_file = "registry.json"
 
 [ogmara]
 node_urls = ["ws://localhost:41721/api/v1/ws/public"]
