@@ -465,6 +465,7 @@ impl PushDispatcher {
     }
 
     /// Sign data with ES256 (ECDSA P-256) using the raw PKCS#8 key bytes.
+    /// Sign with ES256 using a PKCS#8 DER key (for APNs .p8 files).
     fn sign_es256(&self, key_der: &[u8], data: &[u8]) -> anyhow::Result<Vec<u8>> {
         use p256::ecdsa::{signature::Signer, Signature, SigningKey};
         use p256::pkcs8::DecodePrivateKey;
@@ -472,7 +473,16 @@ impl PushDispatcher {
         let signing_key = SigningKey::from_pkcs8_der(key_der)
             .map_err(|e| anyhow::anyhow!("ES256 key parse error: {}", e))?;
         let signature: Signature = signing_key.sign(data);
-        // APNs expects raw r||s format (64 bytes), not DER
+        Ok(signature.to_bytes().to_vec())
+    }
+
+    /// Sign with ES256 using raw 32-byte private key (for VAPID Web Push).
+    fn sign_es256_raw(&self, key_bytes: &[u8], data: &[u8]) -> anyhow::Result<Vec<u8>> {
+        use p256::ecdsa::{signature::Signer, Signature, SigningKey};
+
+        let signing_key = SigningKey::from_bytes(key_bytes.into())
+            .map_err(|e| anyhow::anyhow!("VAPID key parse error: {}", e))?;
+        let signature: Signature = signing_key.sign(data);
         Ok(signature.to_bytes().to_vec())
     }
 
@@ -690,7 +700,8 @@ impl PushDispatcher {
         let claims_b64 = BASE64URL.encode(claims.to_string().as_bytes());
         let signing_input = format!("{}.{}", header_b64, claims_b64);
 
-        match self.sign_es256(key_bytes, signing_input.as_bytes()) {
+        // VAPID uses raw 32-byte private key (not PKCS8 DER like APNs)
+        match self.sign_es256_raw(key_bytes, signing_input.as_bytes()) {
             Ok(sig) => {
                 let sig_b64 = BASE64URL.encode(&sig);
                 Some(format!("{}.{}", signing_input, sig_b64))
