@@ -5,6 +5,37 @@ All notable changes to the Ogmara Push Gateway will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-04-04
+
+### Added
+- RFC 8291 Web Push payload encryption via `ece` crate — browsers now accept
+  push payloads (previously sent plaintext, which was silently rejected)
+- `GET /vapid-key` endpoint — returns the VAPID public key for Web Push
+  subscriptions (`PushManager.subscribe({ applicationServerKey })`)
+- Persistent device registry — registrations survive gateway restarts via
+  atomic JSON file writes (configurable via `registry_file` in config)
+- Bearer token authentication on `/push` — accepts both `X-Push-Secret`
+  header and `Authorization: Bearer <token>` (compatible with L2 node)
+- "reply" notification type support (treated same as mention)
+
+### Changed
+- `PushTrigger.channel_id` now accepts both string and number JSON values
+  (L2 node sends u64, some clients send string)
+- `WebPushKeys.p256dh` and `WebPushKeys.auth` are now required fields
+  (were optional, but encryption requires them)
+- Web Push body uses `Content-Type: application/octet-stream` with encrypted
+  payload instead of raw JSON
+
+### Security
+- Constant-time push secret comparison — prevents timing attacks (C1)
+- `/unregister` now requires auth headers (was unauthenticated — C3)
+- `/push` refuses to serve when no push secret is configured (C4)
+- Timestamp validation now rejects both past and future drift > 5 min (W4)
+
+### Fixed
+- Auth mismatch: L2 node sends `Authorization: Bearer` but gateway only
+  checked `X-Push-Secret` header — now accepts both
+
 ## [0.2.0] - 2026-03-29
 
 ### Added

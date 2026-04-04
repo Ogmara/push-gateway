@@ -17,10 +17,22 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
-use tracing::{info, warn};
+use tracing::warn;
 
-use crate::push::{self, PushDispatcher, PushPayload};
+use crate::push::{self, PushDispatcher};
 use crate::registry::{DeviceRegistry, RegisterRequest};
+
+/// Constant-time string comparison to prevent timing attacks on secrets.
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.as_bytes()
+        .iter()
+        .zip(b.as_bytes())
+        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+        == 0
+}
 
 /// Shared state for API handlers.
 pub struct ApiState {
@@ -28,6 +40,9 @@ pub struct ApiState {
     pub dispatcher: Arc<PushDispatcher>,
     /// Shared secret for L2 node → gateway authentication on /push.
     pub push_secret: String,
+    /// VAPID public key (base64url-encoded uncompressed P-256 point).
+    /// Empty if Web Push is not configured.
+    pub vapid_public_key: String,
 }
 
 /// Build the API router.
@@ -49,6 +64,7 @@ pub fn build_router(state: Arc<ApiState>) -> Router {
         .route("/unregister", post(unregister_device))
         .route("/push", post(receive_push))
         .route("/stats", get(stats))
+        .route("/vapid-key", get(vapid_public_key))
         .layer(cors)
         .layer(TraceLayer::new_for_http())
         .layer(Extension(state))
@@ -69,6 +85,21 @@ async fn stats(Extension(state): Extension<Arc<ApiState>>) -> Json<serde_json::V
         "registered_devices": state.registry.device_count(),
         "registered_addresses": state.registry.registered_addresses().len(),
     }))
+}
+
+/// GET /vapid-key — return the VAPID public key for Web Push subscriptions.
+///
+/// Clients use this key with `PushManager.subscribe({ applicationServerKey })`.
+async fn vapid_public_key(
+    Extension(state): Extension<Arc<ApiState>>,
+) -> impl IntoResponse {
+    if state.vapid_public_key.is_empty() {
+        return (StatusCode::SERVICE_UNAVAILABLE, "Web Push not configured").into_response();
+    }
+    Json(serde_json::json!({
+        "publicKey": state.vapid_public_key,
+    }))
+    .into_response()
 }
 
 /// POST /register — register a device for push notifications.
@@ -115,13 +146,14 @@ async fn register_device(
         return (StatusCode::UNAUTHORIZED, "auth headers required").into_response();
     }
 
-    // Reject stale timestamps (> 5 minutes old)
+    // Reject timestamps outside ±5 minute window
     if let Ok(ts) = auth_ts.parse::<u64>() {
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64;
-        if now_ms.saturating_sub(ts) > 300_000 {
+        let diff = if now_ms > ts { now_ms - ts } else { ts - now_ms };
+        if diff > 300_000 {
             return (StatusCode::UNAUTHORIZED, "timestamp expired").into_response();
         }
     } else {
@@ -133,6 +165,8 @@ async fn register_device(
 }
 
 /// POST /unregister — remove a device registration.
+///
+/// Requires the same auth headers as /register to prevent unauthorized removal.
 #[derive(Deserialize)]
 struct UnregisterRequest {
     address: String,
@@ -141,35 +175,87 @@ struct UnregisterRequest {
 
 async fn unregister_device(
     Extension(state): Extension<Arc<ApiState>>,
+    headers: HeaderMap,
     Json(req): Json<UnregisterRequest>,
-) -> Json<serde_json::Value> {
+) -> impl IntoResponse {
+    // Verify the request is from the address owner (same auth as /register)
+    let auth_address = headers
+        .get("x-ogmara-address")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let auth_sig = headers
+        .get("x-ogmara-auth")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let auth_ts = headers
+        .get("x-ogmara-timestamp")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    if auth_address != req.address {
+        return (StatusCode::UNAUTHORIZED, "address mismatch").into_response();
+    }
+    if auth_sig.is_empty() || auth_ts.is_empty() {
+        return (StatusCode::UNAUTHORIZED, "auth headers required").into_response();
+    }
+
+    // Reject stale timestamps (> 5 minutes)
+    if let Ok(ts) = auth_ts.parse::<u64>() {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let diff = if now_ms > ts { now_ms - ts } else { ts - now_ms };
+        if diff > 300_000 {
+            return (StatusCode::UNAUTHORIZED, "timestamp expired").into_response();
+        }
+    } else {
+        return (StatusCode::BAD_REQUEST, "invalid timestamp").into_response();
+    }
+
     state.registry.unregister(&req.address, &req.token);
-    Json(serde_json::json!({ "ok": true }))
+    Json(serde_json::json!({ "ok": true })).into_response()
 }
 
 /// POST /push — receive a push notification trigger from an L2 node.
 ///
-/// This is called by the L2 node's notification engine when it detects
-/// a mention for a user that has push notifications configured.
+/// Called by the L2 node's notification engine when it detects a mention
+/// or DM for a user that has push notifications configured.
+///
+/// Accepts auth via either `X-Push-Secret` header or `Authorization: Bearer <token>`.
 #[derive(Deserialize)]
 struct PushTrigger {
-    /// Target address to notify.
+    /// Target address to notify (klv1...).
     address: String,
-    /// Notification type.
+    /// Notification type: "mention" or "dm".
     #[serde(rename = "type")]
     notification_type: String,
-    /// Channel name (for mentions).
+    /// Channel name (for display in mention notifications).
     channel_name: Option<String>,
-    /// Channel ID.
-    channel_id: Option<String>,
+    /// Channel ID (may be sent as string or number by the L2 node).
+    channel_id: Option<serde_json::Value>,
     /// Conversation ID (for DMs).
     conversation_id: Option<String>,
-    /// Sender address (for DMs).
+    /// Sender/author address.
     sender: Option<String>,
-    /// Message ID.
+    /// Message ID (hex-encoded).
     msg_id: Option<String>,
-    /// Timestamp.
+    /// Message preview (first 100 chars, no content for DMs).
+    preview: Option<String>,
+    /// Timestamp (Unix ms).
     timestamp: Option<u64>,
+}
+
+impl PushTrigger {
+    /// Extract channel_id as a string regardless of whether the L2 node
+    /// sent it as a JSON string or number.
+    fn channel_id_str(&self) -> Option<String> {
+        self.channel_id.as_ref().map(|v| match v {
+            serde_json::Value::String(s) => s.clone(),
+            serde_json::Value::Number(n) => n.to_string(),
+            other => other.to_string(),
+        })
+    }
 }
 
 async fn receive_push(
@@ -177,13 +263,33 @@ async fn receive_push(
     headers: HeaderMap,
     Json(trigger): Json<PushTrigger>,
 ) -> impl IntoResponse {
-    // Authenticate: require shared secret from L2 node
-    if !state.push_secret.is_empty() {
+    // Authenticate: require shared secret via X-Push-Secret or Bearer token.
+    // Refuse to serve /push if no secret is configured (prevents open relay).
+    if state.push_secret.is_empty() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "push secret not configured",
+        )
+            .into_response();
+    }
+    {
         let provided = headers
             .get("x-push-secret")
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
-        if provided != state.push_secret {
+
+        // Fall back to Authorization: Bearer <token>
+        let provided = if provided.is_empty() {
+            headers
+                .get("authorization")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.strip_prefix("Bearer "))
+                .unwrap_or("")
+        } else {
+            provided
+        };
+
+        if !constant_time_eq(provided, &state.push_secret) {
             warn!("Unauthorized /push attempt");
             return (StatusCode::UNAUTHORIZED, "invalid push secret").into_response();
         }
@@ -195,9 +301,9 @@ async fn receive_push(
     }
 
     let payload = match trigger.notification_type.as_str() {
-        "mention" => push::mention_payload(
+        "mention" | "reply" => push::mention_payload(
             trigger.channel_name.as_deref().unwrap_or("unknown"),
-            trigger.channel_id.as_deref().unwrap_or(""),
+            &trigger.channel_id_str().unwrap_or_default(),
             trigger.msg_id.as_deref().unwrap_or(""),
             trigger.timestamp.unwrap_or(0),
         ),
@@ -207,7 +313,8 @@ async fn receive_push(
             trigger.msg_id.as_deref().unwrap_or(""),
             trigger.timestamp.unwrap_or(0),
         ),
-        _ => {
+        other => {
+            warn!(notification_type = %other, "Unknown notification type");
             return (StatusCode::BAD_REQUEST, "unknown notification type").into_response();
         }
     };
