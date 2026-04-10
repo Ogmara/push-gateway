@@ -1,5 +1,7 @@
 # Ogmara Push Gateway
 
+[![Docker Hub](https://img.shields.io/badge/Docker%20Hub-ogmara%2Fogmara-blue)](https://hub.docker.com/r/ogmara/ogmara)
+
 Push notification bridge for the [Ogmara](https://ogmara.org) decentralized platform. Connects to L2 nodes via WebSocket and delivers mention/DM notifications to mobile and web clients via FCM, APNs, and Web Push.
 
 ## Architecture
@@ -20,15 +22,45 @@ Push notification bridge for the [Ogmara](https://ogmara.org) decentralized plat
 
 ## Quick Start
 
+### Docker (recommended)
+
 ```bash
-# Generate default config
-ogmara-push-gateway init
+docker pull ogmara/ogmara:push-gateway-latest
 
-# Edit push-gateway.toml with your L2 node URLs and push credentials
+# Create and edit config
+mkdir -p ~/ogmara-push-gateway
+docker run --rm ogmara/ogmara:push-gateway-latest init \
+  --output /dev/stdout > ~/ogmara-push-gateway/push-gateway.toml
+# Edit ~/ogmara-push-gateway/push-gateway.toml:
+#   - Set listen_addr = "0.0.0.0"
+#   - Set node_urls to your L2 node address
+#   - Configure webpush/fcm/apns as needed
 
-# Start the gateway
+# Run
+docker run -d \
+  --name ogmara-push-gateway \
+  --restart unless-stopped \
+  -v ~/ogmara-push-gateway/push-gateway.toml:/etc/ogmara/push-gateway.toml:ro \
+  -v push-gw-data:/data \
+  -p 41722:41722 \
+  -e OGMARA_PUSH_SECRET="your-shared-secret" \
+  ogmara/ogmara:push-gateway-latest
+```
+
+Images are tagged by version (e.g., `ogmara/ogmara:push-gateway-0.4.0`) and
+`push-gateway-latest` for the most recent. See all tags on
+[Docker Hub](https://hub.docker.com/r/ogmara/ogmara/tags?name=push-gateway).
+
+### From source
+
+```bash
+cargo build --release
+ogmara-push-gateway init        # generate push-gateway.toml
+# edit push-gateway.toml
 ogmara-push-gateway run
 ```
+
+See [BUILDING.md](BUILDING.md) for full build, configuration, and deployment instructions.
 
 ## API Endpoints
 
@@ -42,15 +74,27 @@ ogmara-push-gateway run
 
 ## Configuration
 
-See [push-gateway.example.toml](push-gateway.example.toml) for all options.
+See [push-gateway.example.toml](push-gateway.example.toml) for all options and
+[BUILDING.md](BUILDING.md) for detailed setup instructions.
 
-**All secrets (API keys, credential files) must be loaded from environment variables in production.**
+| Deployment | Config file location |
+|------------|---------------------|
+| **Docker** | `~/ogmara-push-gateway/push-gateway.toml` on host, mounted to `/etc/ogmara/push-gateway.toml` |
+| **Systemd** | `/var/lib/ogmara/push-gateway/push-gateway.toml` |
+| **From source** | `push-gateway.toml` in working directory |
+
+**Secrets** should be passed via environment variables in production:
+
+| Variable | Purpose |
+|----------|---------|
+| `OGMARA_PUSH_SECRET` | Shared secret for L2 node authentication (must match L2 node `[push_gateway].auth_token`) |
+| `OGMARA_VAPID_PRIVATE_KEY` | VAPID private key for Web Push (base64url, 32 bytes) |
+| `OGMARA_FCM_SERVICE_ACCOUNT_KEY` | Firebase service account credentials |
+| `OGMARA_APNS_KEY_PATH` | Path to APNs auth key (.p8 file) |
 
 ## Building
 
-```bash
-cargo build --release
-```
+See [BUILDING.md](BUILDING.md) for prerequisites, build steps, Docker, and systemd deployment.
 
 ## Privacy
 
