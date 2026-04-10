@@ -5,6 +5,19 @@ All notable changes to the Ogmara Push Gateway will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-04-10
+
+### Added
+- Dockerfile with multi-stage build (Rust builder + Debian slim runtime)
+- Docker deployment instructions in BUILDING.md and README.md
+- Docker Hub badge and image tags (`push-gateway-latest`, `push-gateway-0.4.0`)
+- Configuration reference tables (config paths per deployment, env vars for secrets)
+- Docker quick start as recommended deployment in README
+
+### Changed
+- README rewritten with Docker-first quick start, config location table, and
+  environment variable reference
+
 ## [0.3.1] - 2026-04-04
 
 ### Fixed

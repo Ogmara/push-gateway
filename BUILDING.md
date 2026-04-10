@@ -141,6 +141,103 @@ curl -s http://127.0.0.1:41722/health | jq .
 curl -s http://127.0.0.1:41722/vapid-key
 ```
 
+## Docker
+
+### Pre-built image
+
+```bash
+docker pull ogmara/ogmara:push-gateway-latest
+```
+
+Images are tagged by version (`ogmara/ogmara:push-gateway-0.3.1`) and
+`push-gateway-latest` for the most recent.
+
+### Configuration
+
+Create a config file from the example and edit it:
+
+```bash
+mkdir -p ~/ogmara-push-gateway
+cp push-gateway.example.toml ~/ogmara-push-gateway/push-gateway.toml
+```
+
+Or download the example directly:
+
+```bash
+mkdir -p ~/ogmara-push-gateway
+curl -sO https://raw.githubusercontent.com/Ogmara/push-gateway/main/push-gateway.example.toml
+cp push-gateway.example.toml ~/ogmara-push-gateway/push-gateway.toml
+```
+
+Edit `~/ogmara-push-gateway/push-gateway.toml`:
+
+> **Important:** Change `listen_addr` to `0.0.0.0` — inside the container,
+> `127.0.0.1` (the default) is not reachable from the host.
+
+```toml
+[gateway]
+listen_addr = "0.0.0.0"
+listen_port = 41722
+push_secret = ""   # set via OGMARA_PUSH_SECRET env var instead
+
+[ogmara]
+# If the L2 node runs on the same Docker network, use its container name:
+node_urls = ["ws://ogmara-node:41721/api/v1/ws/public"]
+# If the L2 node runs on the host:
+# node_urls = ["ws://host.docker.internal:41721/api/v1/ws/public"]
+
+[webpush]
+enabled = true
+vapid_private_key = ""   # set via env var or in the config
+vapid_subject = "mailto:admin@yourdomain.org"
+```
+
+### Run with Docker
+
+```bash
+docker run -d \
+  --name ogmara-push-gateway \
+  -v ~/ogmara-push-gateway/push-gateway.toml:/etc/ogmara/push-gateway.toml:ro \
+  -v push-gw-data:/data \
+  -p 41722:41722 \
+  -e OGMARA_PUSH_SECRET="your-shared-secret" \
+  ogmara/ogmara:push-gateway-latest
+```
+
+The config file is mounted read-only at `/etc/ogmara/push-gateway.toml`.
+Device registrations are persisted in the `/data` volume (`registry.json`).
+
+Secrets can be passed as environment variables instead of putting them in
+the config file:
+
+| Variable | Purpose |
+|----------|---------|
+| `OGMARA_PUSH_SECRET` | Shared secret for L2 node authentication |
+| `OGMARA_VAPID_PRIVATE_KEY` | VAPID private key (Web Push) |
+| `OGMARA_FCM_SERVICE_ACCOUNT_KEY` | Firebase credentials |
+| `OGMARA_APNS_KEY_PATH` | APNs auth key file path |
+
+### Check logs
+
+```bash
+docker logs ogmara-push-gateway -f
+```
+
+### Verify
+
+```bash
+curl -s http://localhost:41722/health | jq .
+curl -s http://localhost:41722/vapid-key
+```
+
+### Build image locally
+
+```bash
+docker build -t ogmara/ogmara:push-gateway-latest .
+```
+
+---
+
 ## VAPID key notes
 
 - The VAPID private key must be a raw 32-byte P-256 scalar, **not** PKCS#8 DER
