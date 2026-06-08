@@ -5,6 +5,88 @@ All notable changes to the Ogmara Push Gateway will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-06-08
+
+### Fixed
+
+- `init` (default config) now emits the `[gateway] public_url` key with guidance
+  — it was required (registration fails closed without it / `OGMARA_GATEWAY_URL`)
+  but missing from the generated config, so fresh installs hit a silent 503.
+
+### Removed
+
+- Cleanup (audit 2026-06-07 Batch 5): dropped unused dependencies `chrono`,
+  `hmac`, `thiserror` (kept `hex` — used by registry-key parsing) and the dead
+  `preview` field on `PushTrigger`.
+
+## [0.6.0] - 2026-06-08
+
+Hardening (audit 2026-06-07 fix-plan B4.4).
+
+### Security
+
+- **Token-at-rest encryption (W3).** Push tokens in `registry.json` are now
+  AES-256-GCM encrypted with `OGMARA_REGISTRY_KEY` (32-byte base64/hex);
+  per-record nonce, versioned blob, transparent legacy-plaintext load + re-encrypt.
+  If the key is unset, a loud warning is logged and tokens stay plaintext (dev).
+- **Real rate limiting (W1).** Per-IP sliding-window limiter (bounded, evicting)
+  on `/register` + `/unregister`, driven by the previously-dead
+  `rate_limit_per_sec`. (Keys on peer IP — documented reverse-proxy caveat.)
+- **SSRF allowlist via `url::Url` (W7).** The Web Push endpoint host is parsed
+  (rejecting embedded userinfo / non-https) and suffix-matched, replacing the
+  bypassable string-slicing.
+
+### Changed
+
+- **Bounded registry + debounced persistence + TTL (W2).** Max 100k addresses;
+  `persist()` is debounced (≤ every 10s + on shutdown) instead of rewriting the
+  whole file per request; stale registrations (>30d) are swept hourly.
+- **Parallel push fan-out (W6)** — `send_to_address` dispatches to a wallet's
+  devices concurrently (bounded).
+
+### Removed
+
+- **Dead WS listener (W9)** — the empty `listener.rs` stub (idle ws://localhost
+  reconnect loop, no dispatch) and `tokio-tungstenite` dep removed; mentions/DMs
+  arrive via authenticated `POST /push`.
+
+### Added
+
+- Tests (W8): SSRF allowlist, registry cap/TTL, token encrypt/decrypt, rate
+  limiter (27 total, was effectively 0).
+
+## [0.5.0] - 2026-06-08
+
+Security hardening from the 2026-06-07 audit campaign (fix-plan B1.2).
+
+### Security
+
+- **`/register` + `/unregister` now verify a Klever wallet signature (audit
+  C1/C2).** Previously these endpoints checked only that auth headers were
+  *present* — anyone could register their own push token under any victim
+  address and receive that victim's mention pushes (channel_id + msg_id →
+  fetchable content). They now Ed25519-verify `x-ogmara-auth` (Klever message
+  format) against the public key decoded from `x-ogmara-address`, over a
+  canonical claim, and require the signing address to equal the registered
+  address (self-registration; device-key delegation is a documented follow-up).
+  Both `klv1…` and `ogd1…` addresses are accepted as signers.
+- **Host-binding + replay protection (audit C3).** The signed claim is
+  `ogmara-push:{action}:{gateway_host}:{nonce}:{timestamp}:{address}:{token}`.
+  Binding `gateway_host` (the gateway's configured `public_url` /
+  `OGMARA_GATEWAY_URL`) defeats cross-gateway replay; a bounded TTL nonce cache
+  rejects same-gateway replay within the ±5min window.
+- **rustls-webpki 0.103.10 → 0.103.13 (RUSTSEC-2026-0098/0099/0104,
+  cross-cutting B1.5)** — fixes weakened cert-chain validation + a reachable CRL
+  panic on outbound TLS (push provider APIs, node WS).
+
+### Added
+
+- `crypto` module: Klever signature verification + bech32 address decoding.
+- `[gateway] public_url` config / `OGMARA_GATEWAY_URL` env — the gateway's
+  canonical public URL that registration signatures bind to (must match the URL
+  clients POST to). Requires sdk-js ≥0.25.0 clients.
+- Tests for signature verification and nonce-replay (previously 0 tests).
+
 ## [0.4.0] - 2026-04-10
 
 ### Added

@@ -57,6 +57,14 @@ pub struct GatewayConfig {
     /// Path to the device registry persistence file (default: "registry.json").
     #[serde(default = "default_registry_file")]
     pub registry_file: String,
+    /// Canonical public URL of this gateway (e.g. "https://push.ogmara.org").
+    /// Registration auth signatures are bound to this value (audit 2026-06-07
+    /// host-binding), so it MUST match the URL clients are configured to POST
+    /// to — otherwise verification fails. Set via the `OGMARA_GATEWAY_URL` env
+    /// var or this config key. Empty disables host-binding (only safe for
+    /// localhost/dev).
+    #[serde(default)]
+    pub public_url: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -172,8 +180,17 @@ listen_addr = "127.0.0.1"
 # Shared secret for L2 node -> gateway auth. Set via OGMARA_PUSH_SECRET env var.
 # Must match the auth_token in the L2 node's [push_gateway] config.
 push_secret = ""
+# Canonical PUBLIC URL of this gateway (e.g. "https://push.example.org"). Device
+# registration signatures are bound to it (audit 2026-06-07), so it MUST match
+# the URL clients are configured to use. Set here or via OGMARA_GATEWAY_URL.
+# REQUIRED: if empty, /register and /unregister reject every request (503).
+public_url = ""
+# Per-IP rate limit for /register and /unregister (audit 2026-06-07 W1).
 rate_limit_per_sec = 20
 # Device registrations are persisted to this file.
+# Push tokens are encrypted at rest (AES-256-GCM) when OGMARA_REGISTRY_KEY is
+# set to a 32-byte base64 or hex key; otherwise they are stored in plaintext
+# (a startup warning is logged). Set the key in production (audit 2026-06-07 W3).
 registry_file = "registry.json"
 
 [ogmara]

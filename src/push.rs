@@ -244,14 +244,38 @@ impl PushDispatcher {
         }
     }
 
+    /// Maximum concurrent provider requests when fanning out to one address's
+    /// devices (audit 2026-06-07 W6). Bounds outbound connection pressure while
+    /// still parallelizing — a wallet has at most `MAX_DEVICES_PER_ADDRESS`
+    /// (10) devices, so this is effectively unbounded for normal traffic but
+    /// caps any future growth.
+    const SEND_CONCURRENCY: usize = 8;
+
     /// Send to all devices registered for an address.
+    ///
+    /// Audit 2026-06-07 W6: sends fan out concurrently (bounded by
+    /// `SEND_CONCURRENCY`) instead of awaiting each provider serially — one
+    /// slow/timing-out provider no longer stalls pushes to a user's other
+    /// devices.
     pub async fn send_to_address(
         &self,
         devices: &[DeviceRegistration],
         payload: &PushPayload,
     ) {
-        for device in devices {
-            self.send(device, payload).await;
+        use futures_util::stream::{FuturesUnordered, StreamExt};
+
+        let mut in_flight = FuturesUnordered::new();
+        let mut iter = devices.iter();
+
+        // Prime the pipeline up to the concurrency bound.
+        for device in iter.by_ref().take(Self::SEND_CONCURRENCY) {
+            in_flight.push(self.send(device, payload));
+        }
+        // As each send completes, start the next queued device.
+        while in_flight.next().await.is_some() {
+            if let Some(device) = iter.next() {
+                in_flight.push(self.send(device, payload));
+            }
         }
     }
 
@@ -748,22 +772,39 @@ struct WebPushKeys {
 
 /// SSRF protection: validate that a Web Push endpoint is an HTTPS URL
 /// pointing to a known push service domain. Rejects internal IPs,
-/// non-HTTPS, and unknown domains.
+/// non-HTTPS, embedded credentials, and unknown domains.
+///
+/// Audit 2026-06-07 W7: previously this did naive string slicing
+/// (`endpoint.get(8..)` + `split('/')`) to extract the host, which is a
+/// parser differential against what reqwest actually dials — a crafted URL
+/// like `https://allowed.push.apple.com@evil.example/` would pass the slice
+/// check but reqwest would connect to `evil.example`. We now parse with
+/// `url::Url` and reject any URL carrying userinfo, then suffix-match on the
+/// real `host_str()`.
 fn is_allowed_push_endpoint(endpoint: &str) -> bool {
-    // Must be HTTPS
-    if !endpoint.starts_with("https://") {
+    let parsed = match url::Url::parse(endpoint) {
+        Ok(u) => u,
+        Err(_) => return false,
+    };
+
+    // Must be HTTPS.
+    if parsed.scheme() != "https" {
         return false;
     }
 
-    // Extract host from URL
-    let host = match endpoint.get(8..) {
-        Some(rest) => rest.split('/').next().unwrap_or(""),
+    // Reject embedded credentials (`https://user:pass@host/…`) — the userinfo
+    // confuses naive host extraction and has no place in a push endpoint.
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return false;
+    }
+
+    // Host that reqwest will actually dial.
+    let host = match parsed.host_str() {
+        Some(h) => h,
         None => return false,
     };
-    // Strip port if present
-    let host = host.split(':').next().unwrap_or(host);
 
-    // Allow known Web Push provider domains
+    // Allow known Web Push provider domains.
     const ALLOWED_SUFFIXES: &[&str] = &[
         ".push.services.mozilla.com",
         ".push.apple.com",
@@ -849,5 +890,71 @@ pub fn dm_payload(conversation_id: &str, sender: &str, msg_id: &str, timestamp: 
             msg_id: msg_id.to_string(),
             timestamp,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_allowed_push_endpoint;
+
+    // Audit 2026-06-07 W7/W8: SSRF allowlist must accept genuine provider hosts
+    // and reject look-alikes, userinfo tricks, and internal targets.
+
+    #[test]
+    fn accepts_known_providers() {
+        assert!(is_allowed_push_endpoint(
+            "https://updates.push.services.mozilla.com/wpush/v2/abc"
+        ));
+        assert!(is_allowed_push_endpoint(
+            "https://api.push.apple.com/3/device/abc"
+        ));
+        assert!(is_allowed_push_endpoint(
+            "https://fcm.googleapis.com/fcm/send/abc"
+        ));
+        // Exact apex match (suffix without the leading dot).
+        assert!(is_allowed_push_endpoint("https://fcm.googleapis.com/x"));
+    }
+
+    #[test]
+    fn rejects_non_https() {
+        assert!(!is_allowed_push_endpoint(
+            "http://updates.push.services.mozilla.com/x"
+        ));
+        assert!(!is_allowed_push_endpoint(
+            "ftp://api.push.apple.com/x"
+        ));
+    }
+
+    #[test]
+    fn rejects_unknown_and_lookalike_hosts() {
+        assert!(!is_allowed_push_endpoint("https://evil.example.com/x"));
+        // Suffix look-alike: the allowed string appears but not as a real suffix.
+        assert!(!is_allowed_push_endpoint(
+            "https://push.apple.com.evil.example/x"
+        ));
+        // Substring, not suffix.
+        assert!(!is_allowed_push_endpoint(
+            "https://api.push.apple.com.attacker.net/x"
+        ));
+    }
+
+    #[test]
+    fn rejects_userinfo_smuggling() {
+        // Naive `get(8..)` + split('/') extraction would read the allowed host
+        // from the userinfo and pass; reqwest would dial `evil.example`.
+        assert!(!is_allowed_push_endpoint(
+            "https://api.push.apple.com@evil.example/x"
+        ));
+        assert!(!is_allowed_push_endpoint(
+            "https://user:pass@api.push.apple.com/x"
+        ));
+    }
+
+    #[test]
+    fn rejects_internal_targets() {
+        assert!(!is_allowed_push_endpoint("https://localhost/x"));
+        assert!(!is_allowed_push_endpoint("https://127.0.0.1/x"));
+        assert!(!is_allowed_push_endpoint("https://169.254.169.254/latest"));
+        assert!(!is_allowed_push_endpoint("not a url at all"));
     }
 }

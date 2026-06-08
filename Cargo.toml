@@ -1,6 +1,6 @@
 [package]
 name = "ogmara-push-gateway"
-version = "0.4.0"
+version = "0.6.1"
 edition = "2021"
 authors = ["Ogmara Contributors"]
 license = "MIT"
@@ -22,8 +22,7 @@ tower-http = { version = "0.6", features = ["cors", "trace"] }
 # HTTP client (push provider APIs)
 reqwest = { version = "0.13", features = ["json"] }
 
-# WebSocket (connect to L2 nodes)
-tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
+# Concurrency utilities (fan-out push sends — audit 2026-06-07 W6)
 futures-util = "0.3"
 
 # Serialization
@@ -35,7 +34,6 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # Error handling
-thiserror = "2.0"
 anyhow = "1.0"
 
 # Configuration
@@ -47,16 +45,25 @@ clap = { version = "4.6", features = ["derive"] }
 # Cryptography (JWT signing for FCM/APNs/VAPID)
 rsa = { version = "0.9", features = ["pkcs5"] }
 sha2 = { version = "0.10", features = ["oid"] }
-hmac = "0.12"
 p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
+
+# Klever wallet signature verification for device registration (audit 2026-06-07)
+ed25519-dalek = "2.2"
+sha3 = "0.10"               # Keccak-256 (Klever message signing format)
+bech32 = "0.11"            # klv1.../ogd1... address decoding
 
 # Web Push encryption (RFC 8291)
 ece = "2.3"
 
+# Token-at-rest encryption for the device registry (audit 2026-06-07 W3)
+aes-gcm = "0.10"
+
+# Robust URL parsing for the Web Push SSRF allowlist (audit 2026-06-07 W7)
+url = "2.5"
+
 # Utilities
 urlencoding = "2.1"
 hex = "0.4"
-chrono = { version = "0.4", features = ["serde"] }
 dashmap = "6.1"
 base64 = "0.22"
 
