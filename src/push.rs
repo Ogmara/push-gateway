@@ -319,7 +319,7 @@ impl PushDispatcher {
         let signing_input = format!("{}.{}", header_b64, claims_b64);
 
         // Sign with RSA private key from service account
-        let signature = match self.sign_rsa(&creds.private_key, signing_input.as_bytes()) {
+        let signature = match Self::sign_rsa(&creds.private_key, signing_input.as_bytes()) {
             Ok(sig) => sig,
             Err(e) => {
                 error!(error = %e, "Failed to sign FCM JWT");
@@ -378,10 +378,12 @@ impl PushDispatcher {
     }
 
     /// Sign data with an RSA private key (PEM-encoded PKCS#8 from Google service account).
-    fn sign_rsa(&self, pem_key: &str, data: &[u8]) -> anyhow::Result<Vec<u8>> {
-        use rsa::pkcs8::DecodePrivateKey;
-        use rsa::pkcs1v15::SigningKey;
-        use rsa::signature::{SignatureEncoding, Signer};
+    ///
+    /// Uses `aws-lc-rs` (constant-time AWS-LC backend) rather than the pure-Rust `rsa`
+    /// crate, which carries an unfixed timing-sidechannel advisory (RUSTSEC-2023-0071,
+    /// "Marvin Attack") with no patched release available.
+    fn sign_rsa(pem_key: &str, data: &[u8]) -> anyhow::Result<Vec<u8>> {
+        use aws_lc_rs::signature::{KeyPair, RsaKeyPair, RSA_PKCS1_SHA256};
 
         // Parse PEM to DER
         let key_b64: String = pem_key
@@ -391,13 +393,16 @@ impl PushDispatcher {
         let der = BASE64.decode(&key_b64)?;
 
         // Parse PKCS#8 DER to RSA private key
-        let rsa_key = rsa::RsaPrivateKey::from_pkcs8_der(&der)
+        let key_pair = RsaKeyPair::from_pkcs8(&der)
             .map_err(|e| anyhow::anyhow!("RSA key parse error: {}", e))?;
 
         // RS256 signing (PKCS1v15 + SHA-256)
-        let signing_key = SigningKey::<sha2::Sha256>::new(rsa_key);
-        let signature = signing_key.sign(data);
-        Ok(signature.to_bytes().into_vec())
+        let mut signature = vec![0u8; key_pair.public_key().modulus_len()];
+        let rng = aws_lc_rs::rand::SystemRandom::new();
+        key_pair
+            .sign(&RSA_PKCS1_SHA256, &rng, data, &mut signature)
+            .map_err(|e| anyhow::anyhow!("RSA signing error: {}", e))?;
+        Ok(signature)
     }
 
     /// Send notification via FCM HTTP v1 API.
@@ -895,7 +900,68 @@ pub fn dm_payload(conversation_id: &str, sender: &str, msg_id: &str, timestamp: 
 
 #[cfg(test)]
 mod tests {
-    use super::is_allowed_push_endpoint;
+    use super::{is_allowed_push_endpoint, PushDispatcher};
+
+    // RS256 cross-implementation vector: key + signature generated with OpenSSL
+    // (`openssl dgst -sha256 -sign`). RSASSA-PKCS1-v1_5 is deterministic, so the
+    // aws-lc-rs backend must reproduce this byte-for-byte. Guards the migration
+    // off the `rsa` crate (RUSTSEC-2023-0071) from silently changing behaviour.
+    const TEST_RSA_PKCS8_PEM: &str = "-----BEGIN PRIVATE KEY-----\n\
+MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQDHgoTafBAcm5AO\n\
+BXdhK92Yd49bS1TQ5pxEHFSM4+35LsVR/WYNHNjYusAQnne9EmQc7I0wIlPU+Pwx\n\
+RMbcz314As99pD1qDgQcvh1XrYMBlIXSgm2+yEzKJmGnb0MnfQOyHkKlElPWL5zP\n\
+PPf+kBDWSpSI5xs7L/1X5e1gRreYFSbunB4q1RY7QUT4LNE91pwBWU+N0ppRLYNY\n\
+AAnhwiVUKyVyxIUciojqvBV28qnq8PkMjd6pBB0qTuOg4nYKn0+h/lSUgQNjWlF/\n\
+Dw7Woevk5b/EuVGMlzSzwVYnv5FKpe4/CAN0oHwLy8aXVv5mFnmvYv0Hiqv6CLBd\n\
+8fNPVxz9AgMBAAECggEAAOVvwCgtbCkw7fl7HxHXfuDSC+xZKVu+tHzckZxo/Qyl\n\
+zy3Wcsj2/CCLNefmz6g4X7iagg0PtkBswKYZCoCoNc0RDNZeWeDHz+aryCsrEEbr\n\
+mSsWNUPiwAr2z5P01AKn1Hm/UwnL953yI2ltcQI9MYE+4gAtTLwTksXqexhDLwRZ\n\
+X3IFdhW4mf8OivaJSTRsnHhBarZJUXaFkI0pHmRv0kJoq4DNpVbMpv0HUNgtCGcW\n\
+v5VCklY60gyOzZ7ilBaqD0PxBhiF89wnlfb6DRSDzeHys/wbwt/X02AiSngjIPlZ\n\
+K2Qi2t6i87FD+8oMw1G+uWzvcbSO7Ab/xiTGee6LYQKBgQDlZ0ERHvfnV6AzciIc\n\
+qLFBpLYXd3ZMieJckaIZniSrliowVSDn7nTOsmz7kAav9cBYg+Td5SYmRIdJOuFD\n\
+iQhH3XsdBVfhIPh4w7av/H9vECLudnSoGXVCAxLTOb8Fm2pLdbRCpEeHPz9oomY1\n\
+AHPWDynTQwt1LmA9EgDRTaU/kQKBgQDepATHBGrxul/G1BZ0oGmGOLASNQ2Krb1U\n\
+F/NFRLnsP7KtL2fGdqLu+IzdWdV+2RJ5uxDsvki9sxQwoluKT/rmXyrfKfD23NIW\n\
+KLrimgqH1L+ohBM8S2pMellg4tKUx7l4xxLnDF/m87zI3SocaHGtudGs99xFAa4h\n\
+WhS+A7SorQKBgQDitw3+Hq3/64C+90AxNKKh7merf3vhnq+grqkWSk2RaoHdbHRt\n\
+4yN7l6jPYYLKacSjdg49Ihd24GkXfWJdPVN6uq/OeZZlPxFxQHMPMCq9F6R+KYGX\n\
+FDnneGQlbr+Tigod84CoD/VE+8Pt4/nAzeatGiVKzcrID4I7OMyoDeWPkQKBgQCQ\n\
+XOwYG/44VbAK3bTd1LH37UQF2k64kGWGZK1CSgkAbmEuOOHiZ0TJDXNRiBGOWbTI\n\
+KAsWZ2AFWVwLGQugSLIYtLa405pCh/bVlX1wt4+Ceen4nANZAlGf22mfEBSZklPq\n\
+Q7M3C+gXeg38dKP8naCwlB+oN2Olfyxoxd9TQlXfVQKBgDe7TN4r7w+8k7bzBsNo\n\
+12mrTd+cHETacT9prIKVNY3/camEjc3vnlVc4dh3jOSSKPQy+TPRFd4nlodNlU/S\n\
+mKuKxyJ//AzvcBt9l5mAOLFVPrfgsXdYjTQZtQgxVDRjGNnvfBsPKK0d87Ipqh53\n\
+OnzKnw7fZS9Bnl0PwCIihuZf\n\
+-----END PRIVATE KEY-----\n";
+
+    const TEST_RSA_MESSAGE: &[u8] = b"ogmara-rs256-test-vector";
+
+    const TEST_RSA_SIGNATURE_B64: &str = "Kbo8tEt6x4Ro+XKvX1EMK1MIstXhMMgEGLv6vTkVI81PbzKXRUZecVd4IAu1pOWQMYUulUvF9xUG6QEts5pSi9QNIB3tptmQ3JRFOcAmwiGuj9ciOpY7a73C1M4Am47kCN1DfitmrscQ1Oj6zvzK/5taWvP5wo1gjqLvBIpJ9aK5a+gWHvfTSzFqBMyK4sPtNVaOcsePTQC829z0uzaZ2gPhgxz7kaJcdLz5cI7sK2SJP4Y/gcqB2LV37+uNTRH8sBdJojUBil6uvQR/GjubCoPJM6a3zIHG3wipFSZ8Dh86O+rZ0O6JElP+IRE7TrteNkmdCLOxM4GocLbfEL2x/A==";
+
+    #[test]
+    fn sign_rsa_matches_openssl_rs256_vector() {
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+
+        let sig = PushDispatcher::sign_rsa(TEST_RSA_PKCS8_PEM, TEST_RSA_MESSAGE)
+            .expect("RS256 signing should succeed for a valid PKCS#8 key");
+        let expected = STANDARD
+            .decode(TEST_RSA_SIGNATURE_B64)
+            .expect("test vector is valid base64");
+
+        assert_eq!(sig.len(), 256, "2048-bit RSA signature must be 256 bytes");
+        assert_eq!(sig, expected, "RS256 signature must match the OpenSSL vector");
+    }
+
+    #[test]
+    fn sign_rsa_rejects_malformed_key() {
+        assert!(PushDispatcher::sign_rsa("not-a-pem", TEST_RSA_MESSAGE).is_err());
+        assert!(PushDispatcher::sign_rsa(
+            "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n",
+            TEST_RSA_MESSAGE
+        )
+        .is_err());
+    }
 
     // Audit 2026-06-07 W7/W8: SSRF allowlist must accept genuine provider hosts
     // and reject look-alikes, userinfo tricks, and internal targets.

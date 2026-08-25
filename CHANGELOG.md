@@ -5,6 +5,46 @@ All notable changes to the Ogmara Push Gateway will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-08-25
+
+Pre-mainnet dependency-security pass. `cargo audit` now reports
+**0 vulnerabilities** for this component (was 3).
+
+### Security
+
+- **Replaced the `rsa` crate with `aws-lc-rs` for RS256 signing**
+  (RUSTSEC-2023-0071, "Marvin Attack" — potential RSA key recovery through
+  timing sidechannels, medium/5.9). **Runtime code**: the affected path is the
+  FCM HTTP v1 service-account JWT signature, i.e. every push we send through
+  Firebase. The advisory has **no patched release** of `rsa` — 0.9.x is the
+  latest stable and the fix only exists in the unreleased 0.10 line — so the
+  only real remediation was to change backend. `aws-lc-rs` was already present
+  in the dependency tree via `rustls`, so this removes a dependency rather than
+  adding one, and brings a constant-time AWS-LC implementation.
+  RSASSA-PKCS1-v1_5 is deterministic, so a new test pins the output against an
+  OpenSSL-generated vector — signatures are byte-identical to before, and FCM
+  authentication behaviour is unchanged.
+- **Bumped `h2` 0.4.13 → 0.4.19** (RUSTSEC-2026-0258, unbounded empty DATA
+  frames). **Runtime code**: reached via both `axum` (our inbound registration
+  API) and `reqwest` (outbound provider calls). Lockfile-only bump.
+- **Bumped `quinn-proto` 0.11.14 → 0.11.17** (RUSTSEC-2026-0185, remote memory
+  exhaustion via unbounded out-of-order stream reassembly, high/7.5).
+  **Runtime code**, reached transitively through `reqwest`. Lockfile-only bump.
+- **Bumped `anyhow` 1.0.102 → 1.0.104** (RUSTSEC-2026-0190, unsoundness in
+  `Error::downcast_mut()`, memory-corruption category). Informational advisory,
+  cleared for completeness.
+
+### Added
+
+- Tests: `sign_rsa_matches_openssl_rs256_vector` (cross-implementation vector
+  proving the `aws-lc-rs` migration is byte-compatible) and
+  `sign_rsa_rejects_malformed_key`.
+
+### Changed
+
+- `PushDispatcher::sign_rsa` is now an associated function rather than a method
+  — it never used `self`, and this makes it directly testable.
+
 ## [0.6.1] - 2026-06-08
 
 ### Fixed

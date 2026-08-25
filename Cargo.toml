@@ -1,6 +1,6 @@
 [package]
 name = "ogmara-push-gateway"
-version = "0.6.1"
+version = "0.7.0"
 edition = "2021"
 authors = ["Ogmara Contributors"]
 license = "MIT"
@@ -43,7 +43,10 @@ toml = "1.1"
 clap = { version = "4.6", features = ["derive"] }
 
 # Cryptography (JWT signing for FCM/APNs/VAPID)
-rsa = { version = "0.9", features = ["pkcs5"] }
+# RS256 (FCM service-account JWT) uses aws-lc-rs, not the pure-Rust `rsa` crate:
+# `rsa` 0.9.x has an unfixed timing sidechannel (RUSTSEC-2023-0071 Marvin Attack)
+# with no patched release. aws-lc-rs is already in the tree via rustls.
+aws-lc-rs = "1.16"
 sha2 = { version = "0.10", features = ["oid"] }
 p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
 
