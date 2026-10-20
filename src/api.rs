@@ -438,7 +438,11 @@ async fn unregister_device(
 struct PushTrigger {
     /// Target address to notify (klv1...).
     address: String,
-    /// Notification type: "mention" or "dm".
+    /// Notification type: "mention", "reply", "dm" or "channel_invite".
+    ///
+    /// Unknown extra fields the node may send (e.g. a future
+    /// `invite_envelope`) are ignored by serde and never reach the push
+    /// provider: the outgoing payload is rebuilt from the typed fields only.
     #[serde(rename = "type")]
     notification_type: String,
     /// Channel name (for display in mention notifications).
@@ -509,22 +513,15 @@ async fn receive_push(
         return (StatusCode::NOT_FOUND, "no devices registered for address").into_response();
     }
 
-    let payload = match trigger.notification_type.as_str() {
-        "mention" | "reply" => push::mention_payload(
-            trigger.channel_name.as_deref().unwrap_or("unknown"),
-            &trigger.channel_id_str().unwrap_or_default(),
-            trigger.msg_id.as_deref().unwrap_or(""),
-            trigger.timestamp.unwrap_or(0),
-        ),
-        "dm" => push::dm_payload(
-            trigger.conversation_id.as_deref().unwrap_or(""),
-            trigger.sender.as_deref().unwrap_or(""),
-            trigger.msg_id.as_deref().unwrap_or(""),
-            trigger.timestamp.unwrap_or(0),
-        ),
-        other => {
-            warn!(notification_type = %other, "Unknown notification type");
-            return (StatusCode::BAD_REQUEST, "unknown notification type").into_response();
+    let payload = match build_payload(&trigger) {
+        Ok(p) => p,
+        Err(msg) => {
+            warn!(
+                notification_type = %truncate_type_for_log(&trigger.notification_type),
+                reason = msg,
+                "Rejected push trigger"
+            );
+            return (StatusCode::BAD_REQUEST, msg).into_response();
         }
     };
 
@@ -537,9 +534,208 @@ async fn receive_push(
     .into_response()
 }
 
+/// Max chars of a caller-supplied `type` string echoed into logs.
+const MAX_LOGGED_TYPE_LEN: usize = 32;
+
+/// Bound a caller-supplied notification type before it is logged.
+fn truncate_type_for_log(t: &str) -> String {
+    t.chars().take(MAX_LOGGED_TYPE_LEN).collect()
+}
+
+/// Max length of a bech32 address (BIP-173 caps the whole string at 90).
+const MAX_ADDRESS_LEN: usize = 90;
+
+/// Hex length of a message id (32-byte Keccak/Blake digest → 64 hex chars).
+const MSG_ID_HEX_LEN: usize = 64;
+
+/// Map a validated push trigger to the outgoing push payload.
+///
+/// Returns `Err(reason)` (→ HTTP 400) for an unknown type or, for
+/// `channel_invite`, a malformed field. The payload is built from explicit
+/// typed fields only, so nothing the node sends beyond them (in particular
+/// an invite envelope or expiry) can be forwarded to a push provider.
+fn build_payload(trigger: &PushTrigger) -> Result<push::PushPayload, &'static str> {
+    match trigger.notification_type.as_str() {
+        "mention" | "reply" => Ok(push::mention_payload(
+            trigger.channel_name.as_deref().unwrap_or("unknown"),
+            &trigger.channel_id_str().unwrap_or_default(),
+            trigger.msg_id.as_deref().unwrap_or(""),
+            trigger.timestamp.unwrap_or(0),
+        )),
+        "dm" => Ok(push::dm_payload(
+            trigger.conversation_id.as_deref().unwrap_or(""),
+            trigger.sender.as_deref().unwrap_or(""),
+            trigger.msg_id.as_deref().unwrap_or(""),
+            trigger.timestamp.unwrap_or(0),
+        )),
+        "channel_invite" => {
+            // Strict: an invite is always about a concrete channel, from a
+            // concrete wallet, identified by a concrete message. Anything
+            // else is a malformed trigger, not something to paper over with
+            // an empty-string default the app would then act on.
+            let channel_id = parse_channel_id(trigger.channel_id.as_ref())
+                .ok_or("channel_invite: invalid or missing channel_id")?;
+            let sender = trigger
+                .sender
+                .as_deref()
+                .filter(|s| is_valid_address(s))
+                .ok_or("channel_invite: invalid or missing sender")?;
+            let msg_id = trigger
+                .msg_id
+                .as_deref()
+                .filter(|m| m.len() == MSG_ID_HEX_LEN && m.bytes().all(|b| b.is_ascii_hexdigit()))
+                .ok_or("channel_invite: invalid or missing msg_id")?;
+            // channel_name is deliberately NOT used: invites usually target
+            // private channels and the rendered text goes to a third party.
+            Ok(push::channel_invite_payload(
+                &channel_id.to_string(),
+                sender,
+                msg_id,
+                trigger.timestamp.unwrap_or(0),
+            ))
+        }
+        _ => Err("unknown notification type"),
+    }
+}
+
+/// Parse a channel id sent as a JSON number or a decimal string into `u64`.
+/// Rejects negatives, floats, non-numeric strings and anything else.
+fn parse_channel_id(v: Option<&serde_json::Value>) -> Option<u64> {
+    match v? {
+        serde_json::Value::Number(n) => n.as_u64(),
+        serde_json::Value::String(s) if !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()) => {
+            s.parse().ok()
+        }
+        _ => None,
+    }
+}
+
+/// Shape check for an Ogmara author address: `klv1…` wallet or `ogd1…`
+/// device key, lowercase bech32 data charset, bounded length. Not a checksum
+/// verification — the node already verified the envelope signature; this
+/// only keeps junk/oversized strings out of the provider payload.
+fn is_valid_address(s: &str) -> bool {
+    const BECH32_CHARSET: &[u8] = b"qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+    let data = match s.strip_prefix("klv1").or_else(|| s.strip_prefix("ogd1")) {
+        Some(d) => d,
+        None => return false,
+    };
+    s.len() <= MAX_ADDRESS_LEN
+        && data.len() >= 6
+        && data.bytes().all(|b| BECH32_CHARSET.contains(&b))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const VALID_SENDER: &str = "klv1qqqqqqqqqqqqqpgqxwakt2g7u9atsnr03gqcgmhcv38pt7mkd94q6shuwt";
+
+    fn trigger(json: serde_json::Value) -> PushTrigger {
+        serde_json::from_value(json).expect("trigger deserializes")
+    }
+
+    fn invite_json() -> serde_json::Value {
+        serde_json::json!({
+            "address": VALID_SENDER,
+            "type": "channel_invite",
+            "channel_id": 42,
+            "channel_name": "secret-room",
+            "msg_id": "ab".repeat(32),
+            "sender": VALID_SENDER,
+            "timestamp": 1_700_000_000_000u64,
+        })
+    }
+
+    #[test]
+    fn channel_invite_accepted() {
+        let p = build_payload(&trigger(invite_json())).expect("valid invite accepted");
+        assert_eq!(p.notification.body, "You were invited to a channel");
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(v["data"]["type"], "channel_invite");
+        assert_eq!(v["data"]["channel_id"], "42");
+        assert_eq!(v["data"]["sender"], VALID_SENDER);
+        assert_eq!(v["data"]["msg_id"], "ab".repeat(32));
+        assert_eq!(v["data"]["timestamp"], 1_700_000_000_000u64);
+    }
+
+    #[test]
+    fn channel_invite_accepts_string_channel_id_and_null_name() {
+        let mut j = invite_json();
+        j["channel_id"] = serde_json::json!("18446744073709551615");
+        j["channel_name"] = serde_json::Value::Null;
+        let p = build_payload(&trigger(j)).expect("string u64 channel id accepted");
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(v["data"]["channel_id"], "18446744073709551615");
+    }
+
+    #[test]
+    fn channel_invite_strips_envelope_and_private_name() {
+        let mut j = invite_json();
+        j["invite_envelope"] = serde_json::json!("c2VjcmV0LWludml0ZS1wcm9vZg==");
+        j["invite_expires_at"] = serde_json::json!(1_800_000_000_000u64);
+        j["anchor_node"] = serde_json::json!("https://node.example");
+        let p = build_payload(&trigger(j)).expect("extra fields ignored, not rejected");
+        let rendered = serde_json::to_string(&p).unwrap();
+        for leaked in [
+            "invite_envelope",
+            "invite_expires_at",
+            "c2VjcmV0LWludml0ZS1wcm9vZg==",
+            "anchor_node",
+            "secret-room",
+        ] {
+            assert!(!rendered.contains(leaked), "push payload leaked {leaked}: {rendered}");
+        }
+    }
+
+    #[test]
+    fn channel_invite_rejects_malformed() {
+        let cases: Vec<(&str, serde_json::Value)> = vec![
+            ("channel_id", serde_json::Value::Null),
+            ("channel_id", serde_json::json!(-1)),
+            ("channel_id", serde_json::json!(1.5)),
+            ("channel_id", serde_json::json!("12a")),
+            ("channel_id", serde_json::json!("")),
+            ("channel_id", serde_json::json!("99999999999999999999999")),
+            ("channel_id", serde_json::json!({"x": 1})),
+            ("sender", serde_json::Value::Null),
+            ("sender", serde_json::json!("")),
+            ("sender", serde_json::json!("abc1qqqqqqqq")),
+            ("sender", serde_json::json!("klv1QQQQQQQQ")),
+            ("sender", serde_json::json!("klv1qqqqqbio")),
+            ("sender", serde_json::json!(format!("klv1{}", "q".repeat(90)))),
+            ("msg_id", serde_json::Value::Null),
+            ("msg_id", serde_json::json!("ab")),
+            ("msg_id", serde_json::json!("zz".repeat(32))),
+            ("msg_id", serde_json::json!("ab".repeat(33))),
+        ];
+        for (field, bad) in cases {
+            let mut j = invite_json();
+            j[field] = bad.clone();
+            assert!(
+                build_payload(&trigger(j)).is_err(),
+                "channel_invite with {field}={bad} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_type_still_rejected_and_existing_types_unchanged() {
+        let mut j = invite_json();
+        j["type"] = serde_json::json!("bogus");
+        assert!(build_payload(&trigger(j)).is_err());
+
+        let mut j = invite_json();
+        j["type"] = serde_json::json!("mention");
+        let v = serde_json::to_value(build_payload(&trigger(j)).unwrap()).unwrap();
+        assert_eq!(v["data"]["type"], "mention");
+        assert_eq!(v["notification"]["body"], "New mention in #secret-room");
+
+        let mut j = invite_json();
+        j["type"] = serde_json::json!("dm");
+        let v = serde_json::to_value(build_payload(&trigger(j)).unwrap()).unwrap();
+        assert_eq!(v["data"]["type"], "dm");
+    }
 
     #[test]
     fn nonce_cache_rejects_replay() {

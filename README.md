@@ -2,7 +2,7 @@
 
 [![Docker Hub](https://img.shields.io/badge/Docker%20Hub-ogmara%2Fogmara-blue)](https://hub.docker.com/r/ogmara/ogmara)
 
-Push notification bridge for the [Ogmara](https://ogmara.org) decentralized platform. Connects to L2 nodes via WebSocket and delivers mention/DM notifications to mobile and web clients via FCM, APNs, and Web Push.
+Push notification bridge for the [Ogmara](https://ogmara.org) decentralized platform. Connects to L2 nodes via WebSocket and delivers mention/reply/DM/channel-invite notifications to mobile and web clients via FCM, APNs, and Web Push.
 
 ## Architecture
 
@@ -101,6 +101,7 @@ See [BUILDING.md](BUILDING.md) for prerequisites, build steps, Docker, and syste
 - Notification content is minimal ("New mention in #general")
 - No message content in push payloads
 - DM notifications never include encrypted content
+- Channel-invite notifications are generic ("You were invited to a channel") and never carry the invite envelope or the channel name
 - Anyone can run their own push gateway
 - Users choose which gateway to use (or disable push entirely)
 

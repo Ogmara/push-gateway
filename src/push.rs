@@ -47,6 +47,16 @@ pub enum PushData {
         msg_id: String,
         timestamp: u64,
     },
+    /// Channel invite (push-gateway 0.8.0+, spec 05 §6.4). Deliberately has
+    /// NO field for the invite envelope / expiry: the envelope is the
+    /// invitee's membership proof and must never reach a third-party push
+    /// provider. The app fetches it from `GET /api/v1/notifications`.
+    ChannelInvite {
+        channel_id: String,
+        sender: String,
+        msg_id: String,
+        timestamp: u64,
+    },
 }
 
 /// Cached OAuth2 access token for FCM.
@@ -553,6 +563,13 @@ impl PushDispatcher {
                 custom_data.insert("msg_id".to_string(), serde_json::json!(msg_id));
                 custom_data.insert("timestamp".to_string(), serde_json::json!(timestamp));
             }
+            PushData::ChannelInvite { channel_id, sender, msg_id, timestamp } => {
+                custom_data.insert("type".to_string(), serde_json::json!("channel_invite"));
+                custom_data.insert("channel_id".to_string(), serde_json::json!(channel_id));
+                custom_data.insert("sender".to_string(), serde_json::json!(sender));
+                custom_data.insert("msg_id".to_string(), serde_json::json!(msg_id));
+                custom_data.insert("timestamp".to_string(), serde_json::json!(timestamp));
+            }
         }
 
         let apns_payload = ApnsPayload {
@@ -863,6 +880,13 @@ fn payload_to_string_map(data: &PushData) -> std::collections::HashMap<String, S
             map.insert("msg_id".to_string(), msg_id.clone());
             map.insert("timestamp".to_string(), timestamp.to_string());
         }
+        PushData::ChannelInvite { channel_id, sender, msg_id, timestamp } => {
+            map.insert("type".to_string(), "channel_invite".to_string());
+            map.insert("channel_id".to_string(), channel_id.clone());
+            map.insert("sender".to_string(), sender.clone());
+            map.insert("msg_id".to_string(), msg_id.clone());
+            map.insert("timestamp".to_string(), timestamp.to_string());
+        }
     }
     map
 }
@@ -898,9 +922,54 @@ pub fn dm_payload(conversation_id: &str, sender: &str, msg_id: &str, timestamp: 
     }
 }
 
+/// Build a channel-invite push payload (spec 05 §6.4, push-gateway 0.8.0+).
+///
+/// The body is intentionally generic: it names neither the channel nor the
+/// inviter, because an invite usually targets a PRIVATE channel and the
+/// rendered text is handed to a third-party push service (FCM/APNs/Web Push)
+/// and shown on a possibly-locked screen. Only ids/metadata travel in `data`;
+/// the invite envelope never does (the app fetches it from the node).
+pub fn channel_invite_payload(channel_id: &str, sender: &str, msg_id: &str, timestamp: u64) -> PushPayload {
+    PushPayload {
+        notification: PushNotification {
+            title: "Ogmara".to_string(),
+            body: "You were invited to a channel".to_string(),
+        },
+        data: PushData::ChannelInvite {
+            channel_id: channel_id.to_string(),
+            sender: sender.to_string(),
+            msg_id: msg_id.to_string(),
+            timestamp,
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{is_allowed_push_endpoint, PushDispatcher};
+    use super::{channel_invite_payload, is_allowed_push_endpoint, payload_to_string_map, PushDispatcher};
+
+    #[test]
+    fn channel_invite_payload_wire_forms_carry_only_ids() {
+        let p = channel_invite_payload("42", "klv1sender", "ab12", 1_700_000_000_000);
+        assert_eq!(p.notification.body, "You were invited to a channel");
+
+        // Web Push form (serde-serialized PushPayload).
+        let v = serde_json::to_value(&p).expect("serialize");
+        let data = v["data"].as_object().expect("data object");
+        let mut keys: Vec<&str> = data.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["channel_id", "msg_id", "sender", "timestamp", "type"]);
+        assert_eq!(data["type"], "channel_invite");
+
+        // FCM form (flat string map).
+        let m = payload_to_string_map(&p.data);
+        let mut keys: Vec<&str> = m.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["channel_id", "msg_id", "sender", "timestamp", "type"]);
+        assert_eq!(m["type"], "channel_invite");
+        assert_eq!(m["channel_id"], "42");
+        assert_eq!(m["timestamp"], "1700000000000");
+    }
 
     // RS256 cross-implementation vector: key + signature generated with OpenSSL
     // (`openssl dgst -sha256 -sign`). RSASSA-PKCS1-v1_5 is deterministic, so the

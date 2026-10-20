@@ -1,9 +1,9 @@
 # Ogmara Push Notification Gateway — Multi-stage Docker build
 #
-# Build:  docker build --network=host -t ogmara/ogmara:push-gateway-0.7.0 .
+# Build:  docker build --network=host -t ogmara/ogmara:push-gateway-0.8.0 .
 # Run:    docker run -v ./push-gateway.toml:/etc/ogmara/push-gateway.toml:ro \
 #           -v push-gw-data:/data -p 41722:41722 \
-#           ogmara/ogmara:push-gateway-0.7.0
+#           ogmara/ogmara:push-gateway-0.8.0
 
 # --- Stage 1: Build ---
 FROM rust:1.94-bookworm AS builder

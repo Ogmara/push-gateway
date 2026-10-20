@@ -5,6 +5,53 @@ All notable changes to the Ogmara Push Gateway will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-10-20
+
+### Added
+
+- **`channel_invite` push notifications** (spec 05 §6.4). The L2 node has
+  sent `channel_invite` triggers to `POST /push` since l2-node 0.128.0, but
+  the gateway answered every one of them with HTTP 400 ("unknown
+  notification type"), so invites never produced a push. The gateway now
+  accepts them and delivers `{"title": "Ogmara", "body": "You were invited
+  to a channel"}` with `data = {type, channel_id, sender, msg_id,
+  timestamp}` over FCM, APNs and Web Push.
+
+### Security
+
+- **Invite triggers are strictly validated and minimised.** `channel_id`
+  must be a `u64` (JSON number or decimal string), `sender` a bounded
+  `klv1…`/`ogd1…` bech32-charset address, and `msg_id` exactly 64 hex
+  chars; anything else is rejected with 400 instead of being defaulted to an
+  empty string. The outgoing payload is rebuilt from typed fields only, so an
+  `invite_envelope` / `invite_expires_at` / `anchor_node` sent by a node is
+  dropped and never reaches a third-party push provider. The channel name is
+  deliberately left out of the invite text: invites usually target private
+  channels and the rendered text is shown on lock screens and handled by
+  FCM/APNs. Unit tests pin the Web Push JSON and FCM string-map wire forms
+  to the five allowed keys (the APNs custom-data arm mirrors them).
+- The caller-supplied notification `type` is length-capped before it is
+  logged on rejection.
+- **Dependency advisories cleared (`cargo audit`: 4 → 0)** via a targeted
+  `cargo update`, no manifest changes:
+  - `rustls` 0.23.37 → 0.23.46 (RUSTSEC-2026-0285 and RUSTSEC-2026-0346/0347/0348/0349, TLS 1.3 handshake
+    messages accepted across encryption-level boundaries, medium).
+    **Runtime code**: every outbound TLS connection to FCM/APNs/Web Push.
+    Pulled `aws-lc-rs` 1.16.2 → 1.18.2 / `aws-lc-sys` 0.39.1 → 0.46.0 and
+    `rustls-webpki` 0.103.13 → 0.103.15 along; the RS256 OpenSSL test vector
+    still matches byte-for-byte.
+  - `quinn-proto` 0.11.17 → 0.11.19 (RUSTSEC-2026-0338, -0340, -0343).
+    Lockfile-only: reqwest's HTTP/3 feature is not enabled, so the crate is
+    not compiled into the gateway.
+  - `chacha20` 0.10.1 → 0.10.2 (yanked-version warning). Lockfile-only, not
+    compiled into the gateway.
+
+### Changed
+
+- `POST /push` payload construction moved into a pure `build_payload()`
+  function (unit-testable); `mention`, `reply` and `dm` behaviour is
+  unchanged.
+
 ## [0.7.0] - 2026-08-25
 
 Pre-mainnet dependency-security pass. `cargo audit` now reports
