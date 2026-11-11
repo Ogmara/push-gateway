@@ -445,7 +445,8 @@ struct PushTrigger {
     /// provider: the outgoing payload is rebuilt from the typed fields only.
     #[serde(rename = "type")]
     notification_type: String,
-    /// Channel name (for display in mention notifications).
+    /// Channel name for mention notifications. Only honoured for public
+    /// channels (id below 2^32); the gateway drops it for private ones.
     channel_name: Option<String>,
     /// Channel ID (may be sent as string or number by the L2 node).
     channel_id: Option<serde_json::Value>,
@@ -548,6 +549,24 @@ const MAX_ADDRESS_LEN: usize = 90;
 /// Hex length of a message id (32-byte Keccak/Blake digest → 64 hex chars).
 const MSG_ID_HEX_LEN: usize = 64;
 
+/// Channel ids at or above this value are private channels (protocol
+/// `PRIVATE_CHANNEL_ID_FLOOR`, 2^32).
+const PRIVATE_CHANNEL_ID_FLOOR: u64 = 1 << 32;
+
+/// The channel name a mention push may show, or `None` for generic text.
+///
+/// The push text is rendered by Google/Apple, so a private channel's name must
+/// never reach it even if the node sends one (an older node, or a private
+/// channel created below the id floor that the node did not recognise). An
+/// empty name is treated as absent.
+fn mention_display_name(trigger: &PushTrigger) -> Option<&str> {
+    let name = trigger.channel_name.as_deref().filter(|n| !n.is_empty())?;
+    match parse_channel_id(trigger.channel_id.as_ref()) {
+        Some(id) if id < PRIVATE_CHANNEL_ID_FLOOR => Some(name),
+        _ => None,
+    }
+}
+
 /// Map a validated push trigger to the outgoing push payload.
 ///
 /// Returns `Err(reason)` (→ HTTP 400) for an unknown type or, for
@@ -557,7 +576,7 @@ const MSG_ID_HEX_LEN: usize = 64;
 fn build_payload(trigger: &PushTrigger) -> Result<push::PushPayload, &'static str> {
     match trigger.notification_type.as_str() {
         "mention" | "reply" => Ok(push::mention_payload(
-            trigger.channel_name.as_deref().unwrap_or("unknown"),
+            mention_display_name(trigger),
             &trigger.channel_id_str().unwrap_or_default(),
             trigger.msg_id.as_deref().unwrap_or(""),
             trigger.timestamp.unwrap_or(0),
@@ -735,6 +754,49 @@ mod tests {
         j["type"] = serde_json::json!("dm");
         let v = serde_json::to_value(build_payload(&trigger(j)).unwrap()).unwrap();
         assert_eq!(v["data"]["type"], "dm");
+    }
+
+    fn mention_body(channel_id: serde_json::Value, name: Option<&str>) -> (String, String) {
+        let mut j = invite_json();
+        j["type"] = serde_json::json!("mention");
+        j["channel_id"] = channel_id;
+        match name {
+            Some(n) => j["channel_name"] = serde_json::json!(n),
+            None => {
+                j.as_object_mut().unwrap().remove("channel_name");
+            }
+        }
+        let p = build_payload(&trigger(j)).unwrap();
+        let whole = serde_json::to_string(&p).unwrap();
+        let v = serde_json::to_value(&p).unwrap();
+        (v["notification"]["body"].as_str().unwrap().to_string(), whole)
+    }
+
+    #[test]
+    fn private_channel_name_never_reaches_the_push_provider() {
+        // Numeric and string ids, at and above the 2^32 private floor.
+        for id in [
+            serde_json::json!(4_294_967_296u64),
+            serde_json::json!("4294967296"),
+            serde_json::json!(9_000_000_000_000u64),
+        ] {
+            let (body, whole) = mention_body(id, Some("secret-room"));
+            assert_eq!(body, "New mention");
+            assert!(!whole.contains("secret-room"), "name leaked: {whole}");
+        }
+    }
+
+    #[test]
+    fn public_channel_keeps_name_and_missing_name_is_generic() {
+        let (body, _) = mention_body(serde_json::json!(4_294_967_295u64), Some("general"));
+        assert_eq!(body, "New mention in #general");
+        let (body, _) = mention_body(serde_json::json!(7), None);
+        assert_eq!(body, "New mention");
+        let (body, _) = mention_body(serde_json::json!(7), Some(""));
+        assert_eq!(body, "New mention");
+        // Unparseable / absent id: cannot prove the channel is public.
+        let (body, _) = mention_body(serde_json::json!("not-a-number"), Some("general"));
+        assert_eq!(body, "New mention");
     }
 
     #[test]

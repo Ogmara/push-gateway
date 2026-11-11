@@ -5,6 +5,31 @@ All notable changes to the Ogmara Push Gateway will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-11-11
+
+### Security
+
+- **Private channel names never reach FCM/APNs.** The mention/reply push body
+  ("New mention in #name") is rendered by Google/Apple. The gateway now shows
+  the channel name only when the trigger's channel id is below 2^32 (public
+  namespace); for private ids, an unparseable id, or a missing/empty name the
+  text is the generic "New mention" (previously "#unknown"). Defence in depth
+  for l2-node 0.144.0, which also stops sending the name for non-public
+  channels. Old private channels created below the id floor are only covered
+  once the node is upgraded. `channel_id` stays in the data payload so a tap
+  still opens the channel; it does let the provider link pushes from the same
+  private channel (documented residual).
+- **Dependencies (runtime, Rust):** `p256` 0.13 → 0.14 (pulls `crypto-bigint`
+  past RUSTSEC-2026-0387, timing variability in constant-time operations used
+  by the ES256 signing for APNs tokens and VAPID); `openssl` 0.10.76 → 0.10.82
+  (RUSTSEC-2026-0463/0473-0479) and `tokio` 1.50 → 1.54.1
+  (RUSTSEC-2026-0386) via `cargo update`. `cargo audit` now reports 0
+  vulnerabilities (only the `pin-utils` unmaintained notice). Signing and
+  public-key derivation now go through `SigningKey::from_slice` with an
+  explicit 32-byte length check (the old `.into()` conversion panics on a
+  wrong-length key); new round-trip tests cover raw (VAPID) and PKCS#8 (APNs)
+  ES256 signatures.
+
 ## [0.8.1] - 2026-10-21
 
 ### Security

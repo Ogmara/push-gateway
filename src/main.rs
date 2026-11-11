@@ -109,7 +109,8 @@ async fn main() -> Result<()> {
                 match BASE64URL.decode(&cfg.webpush.vapid_private_key) {
                     Ok(key_bytes) => {
                         use p256::ecdsa::SigningKey;
-                        match SigningKey::from_slice(&key_bytes) {
+                        // Exactly 32 bytes: from_slice would left-pad a shorter key.
+                        match SigningKey::from_slice(&key_bytes).ok().filter(|_| key_bytes.len() == 32).ok_or("VAPID key must be 32 bytes") {
                             Ok(sk) => {
                                 let pk = sk.verifying_key();
                                 let pub_bytes = pk.to_sec1_bytes();

@@ -519,7 +519,10 @@ impl PushDispatcher {
     fn sign_es256_raw(&self, key_bytes: &[u8], data: &[u8]) -> anyhow::Result<Vec<u8>> {
         use p256::ecdsa::{signature::Signer, Signature, SigningKey};
 
-        let signing_key = SigningKey::from_bytes(key_bytes.into())
+        // A VAPID private key is exactly 32 bytes; from_slice would left-pad a
+        // shorter value into a different, valid key.
+        anyhow::ensure!(key_bytes.len() == 32, "VAPID key must be 32 bytes");
+        let signing_key = SigningKey::from_slice(key_bytes)
             .map_err(|e| anyhow::anyhow!("VAPID key parse error: {}", e))?;
         let signature: Signature = signing_key.sign(data);
         Ok(signature.to_bytes().to_vec())
@@ -763,7 +766,7 @@ impl PushDispatcher {
     fn vapid_public_key(&self, key_bytes: &[u8]) -> Vec<u8> {
         use p256::ecdsa::SigningKey;
 
-        match SigningKey::from_bytes(key_bytes.into()) {
+        match SigningKey::from_slice(key_bytes).ok().filter(|_| key_bytes.len() == 32).ok_or(()) {
             Ok(sk) => {
                 let pk = sk.verifying_key();
                 pk.to_sec1_bytes().to_vec()
@@ -892,11 +895,17 @@ fn payload_to_string_map(data: &PushData) -> std::collections::HashMap<String, S
 }
 
 /// Build a mention push payload (spec 6.4).
-pub fn mention_payload(channel_name: &str, channel_id: &str, msg_id: &str, timestamp: u64) -> PushPayload {
+///
+/// `channel_name` is `None` for private channels or when the node sent no
+/// name: the text then carries no channel name (it is rendered by FCM/APNs).
+pub fn mention_payload(channel_name: Option<&str>, channel_id: &str, msg_id: &str, timestamp: u64) -> PushPayload {
     PushPayload {
         notification: PushNotification {
             title: "Ogmara".to_string(),
-            body: format!("New mention in #{}", channel_name),
+            body: match channel_name {
+                Some(name) => format!("New mention in #{}", name),
+                None => "New mention".to_string(),
+            },
         },
         data: PushData::Mention {
             channel_id: channel_id.to_string(),
@@ -1030,6 +1039,46 @@ OnzKnw7fZS9Bnl0PwCIihuZf\n\
             TEST_RSA_MESSAGE
         )
         .is_err());
+    }
+
+    fn test_dispatcher() -> PushDispatcher {
+        let cfg: crate::config::Config =
+            toml::from_str(&crate::config::Config::default_toml()).expect("default config parses");
+        PushDispatcher::new(&cfg)
+    }
+
+    #[test]
+    fn es256_raw_and_pkcs8_signatures_verify_against_the_derived_public_key() {
+        // Guards the p256 upgrade: VAPID (raw 32-byte key) and APNs (PKCS#8)
+        // signing must produce signatures the public key verifies.
+        use p256::ecdsa::{signature::Verifier, Signature, SigningKey, VerifyingKey};
+        use p256::pkcs8::EncodePrivateKey;
+
+        let d = test_dispatcher();
+        let raw = [7u8; 32];
+        let data = b"ogmara-es256-test";
+
+        let sig = d.sign_es256_raw(&raw, data).expect("raw key signs");
+        assert_eq!(sig.len(), 64);
+        let pk = d.vapid_public_key(&raw);
+        assert_eq!(pk.len(), 65, "uncompressed SEC1 point");
+        let vk = VerifyingKey::from_sec1_bytes(&pk).expect("valid public key");
+        vk.verify(data, &Signature::from_slice(&sig).unwrap()).expect("raw-key signature verifies");
+
+        let sk = SigningKey::from_slice(&raw).unwrap();
+        let der = sk.to_pkcs8_der().unwrap();
+        let sig2 = d.sign_es256(der.as_bytes(), data).expect("pkcs8 key signs");
+        vk.verify(data, &Signature::from_slice(&sig2).unwrap()).expect("pkcs8 signature verifies");
+    }
+
+    #[test]
+    fn es256_rejects_wrong_length_or_garbage_keys_without_panicking() {
+        let d = test_dispatcher();
+        assert!(d.sign_es256_raw(&[1u8; 31], b"x").is_err());
+        assert!(d.sign_es256_raw(&[], b"x").is_err());
+        assert!(d.sign_es256_raw(&[0u8; 32], b"x").is_err(), "zero scalar is invalid");
+        assert!(d.sign_es256(b"garbage", b"x").is_err());
+        assert!(d.vapid_public_key(&[1u8; 5]).is_empty());
     }
 
     // Audit 2026-06-07 W7/W8: SSRF allowlist must accept genuine provider hosts
