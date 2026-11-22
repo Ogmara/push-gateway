@@ -5,6 +5,16 @@ All notable changes to the Ogmara Push Gateway will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.1] - 2026-11-22
+
+### Security
+
+- **`quinn-udp` 0.5.14 → 0.5.16** (RUSTSEC-2026-0538, receive loop can spin
+  after a truncated datagram). Lockfile only: `quinn-udp` sits behind an
+  optional HTTP/3 feature that this crate does not enable, so it was never
+  compiled into the gateway binary (`cargo tree -i quinn-udp --target all`
+  prints nothing). No runtime change; no new Docker image needed.
+
 ## [0.9.0] - 2026-11-11
 
 ### Security
